@@ -157,13 +157,14 @@ export function tmuxSessionExists(session: string): boolean {
 
 /** Start the child pi process for a run in its tmux session. `initialArgs` are only passed on first spawn. */
 export function launchRun(metadata: RunMetadata, initialArgs: string[] = []): void {
-	let launcher = "pi";
+	// Local patch: children run as Bkper Agent (`bkper agent` passthrough) instead of plain pi.
+	let launcher = ["bkper", "agent"];
 	const testLauncher = join(metadata.cwd, "pi-test.sh");
 	try {
 		accessSync(testLauncher, constants.X_OK);
-		launcher = testLauncher;
+		launcher = [testLauncher];
 	} catch {
-		// Use the installed pi executable.
+		// Use the installed bkper executable.
 	}
 
 	const result = spawnSync(
@@ -182,7 +183,7 @@ export function launchRun(metadata: RunMetadata, initialArgs: string[] = []): vo
 			"--",
 			"env",
 			`PI_SUBAGENT_RUN_DIR=${metadata.runDir}`,
-			launcher,
+			...launcher,
 			"--session",
 			metadata.sessionFile,
 			"--provider",
