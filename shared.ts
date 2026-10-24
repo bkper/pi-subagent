@@ -184,6 +184,8 @@ export function launchRun(metadata: RunMetadata, initialArgs: string[] = []): vo
 			"env",
 			`PI_SUBAGENT_RUN_DIR=${metadata.runDir}`,
 			...launcher,
+			// Local patch: the parent already trusts this project; a hidden trust prompt would block the child.
+			"--approve",
 			"--session",
 			metadata.sessionFile,
 			"--provider",
