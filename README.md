@@ -2,24 +2,26 @@
 
 Observable, persistent Pi subagents for independent reviews, investigations, and delegated implementation.
 
+Bkper's fork of [badlogic/pi-subagent](https://github.com/badlogic/pi-subagent): subagents start as Bkper Agent (`bkper agent`) and trust the project their parent already runs in.
+
 Each subagent runs in its own tmux session with a dedicated Pi JSONL session. The parent can inspect status, wait for durable results, steer active work, queue follow-ups, or attach directly to the child TUI.
 
 ## Requirements
 
-- Pi
+- Bkper CLI 5.7.2 or newer (`npm i -g bkper`), used as `bkper agent`
 - Node.js 22.19 or newer
 - tmux
 
 ## Install
 
-Clone into Pi's global extension directory and expose the CLI on `PATH`:
+Clone into Bkper Agent's global extension directory and expose the CLI on `PATH`:
 
 ```sh
-git clone git@github.com:earendil-works/pi-subagent.git ~/.pi/agent/extensions/subagent
+git clone https://github.com/bkper/pi-subagent.git ~/.pi/agent/extensions/subagent
 ln -s ../extensions/subagent/subagent.ts ~/.pi/agent/bin/subagent
 ```
 
-Run `/reload` in an existing Pi session. The extension contributes its bundled skill automatically.
+Run `/reload` in an existing Bkper Agent session. The extension contributes its bundled skill automatically.
 
 ## Usage
 
