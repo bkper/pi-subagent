@@ -79,7 +79,7 @@ function generateHandle(): string {
 }
 
 function spawnSubagent(args: string[]): void {
-	if (process.env.PI_SUBAGENT_RUN_DIR) fail("Nested subagents are disabled");
+	if (process.env.PI_SUBAGENT_RUN_DIR || process.env.PI_SUBAGENT_NESTED) fail("Nested subagents are disabled");
 	let name: string | undefined;
 	let provider = process.env.PI_PROVIDER;
 	let model = process.env.PI_MODEL;

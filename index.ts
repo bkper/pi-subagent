@@ -33,8 +33,27 @@ function displayState(metadata: RunMetadata): string {
 	return effectiveRunState(metadata).padEnd(8);
 }
 
+/** Survives `/reload`, which re-evaluates this module in the same process. */
+const processState = globalThis as { piSubagentRunDir?: string };
+
+/**
+ * Claim the run for this process only. Pi processes started from the child's tools (tests, scripts) would
+ * otherwise inherit PI_SUBAGENT_RUN_DIR and act as the child: mark it exited on quit, rewrite its metadata,
+ * and consume its inbox. They inherit PI_SUBAGENT_NESTED instead, which disables this extension and spawning.
+ */
+function claimRunDir(): string | undefined {
+	const inherited = process.env.PI_SUBAGENT_RUN_DIR;
+	if (inherited) {
+		processState.piSubagentRunDir = inherited;
+		delete process.env.PI_SUBAGENT_RUN_DIR;
+		process.env.PI_SUBAGENT_NESTED = "1";
+	}
+	return processState.piSubagentRunDir;
+}
+
 export default function subagentExtension(pi: ExtensionAPI) {
-	const runDir = process.env.PI_SUBAGENT_RUN_DIR;
+	const runDir = claimRunDir();
+	if (!runDir && process.env.PI_SUBAGENT_NESTED) return;
 	if (!runDir) {
 		pi.on("resources_discover", () => ({ skillPaths: [join(packageDir, "skills")] }));
 	}
