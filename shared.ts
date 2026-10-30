@@ -248,9 +248,68 @@ function parseSplitBlock(output: string): string | undefined {
 	}
 }
 
+interface LayoutLeaf {
+	blockId: string;
+	area: number;
+}
+
+function collectLeaves(node: unknown, leaves: LayoutLeaf[]): void {
+	if (typeof node !== "object" || node === null) return;
+	const record = node as Record<string, unknown>;
+	const rect = record.rect;
+	if (typeof record.block_id === "string" && Array.isArray(rect) && rect.length === 4) {
+		const [, , width, height] = rect;
+		if (typeof width === "number" && typeof height === "number") {
+			leaves.push({ blockId: record.block_id, area: width * height });
+		}
+		return;
+	}
+	const split = record.split;
+	if (typeof split === "object" && split !== null) {
+		const parts = split as Record<string, unknown>;
+		collectLeaves(parts.before, leaves);
+		collectLeaves(parts.after, leaves);
+	}
+}
+
+/** The largest other tiled block in the parent's Rex window, or undefined when the parent is alone. */
+async function largestOtherBlock(rex: RexAnchor): Promise<string | undefined> {
+	const info = await runRex(rex, ["block", "inspect", rex.block]);
+	const sessionId = info?.match(/^session: (\S+)$/m)?.[1];
+	const windowId = info?.match(/^window: (\S+)$/m)?.[1];
+	if (!sessionId || !windowId) return undefined;
+	const output = await runRex(rex, ["api", "call", "session.view", JSON.stringify({ session_id: sessionId })]);
+	if (!output) return undefined;
+	let view: unknown;
+	try {
+		view = JSON.parse(output);
+	} catch {
+		return undefined;
+	}
+	const windows = (view as { windows?: unknown } | null)?.windows;
+	if (!Array.isArray(windows)) return undefined;
+	const window: unknown = windows.find(
+		(candidate: unknown) => (candidate as { window_id?: unknown } | null)?.window_id === windowId,
+	);
+	const layers = (window as { layers?: unknown } | undefined)?.layers;
+	if (!Array.isArray(layers)) return undefined;
+	for (const layer of layers) {
+		const { kind, layout } = (layer ?? {}) as { kind?: unknown; layout?: unknown };
+		if (kind !== "tiled") continue;
+		const leaves: LayoutLeaf[] = [];
+		collectLeaves(layout, leaves);
+		if (!leaves.some((leaf) => leaf.blockId === rex.block)) continue;
+		return leaves
+			.filter((leaf) => leaf.blockId !== rex.block)
+			.sort((a, b) => b.area - a.area)[0]?.blockId;
+	}
+	return undefined;
+}
+
 /**
- * Open a Rex block attached to the run's tmux session unless one is already open. The first viewer goes right
- * of the parent; later ones stack below the newest open sibling viewer. Does nothing outside Rex or on failure.
+ * Open a Rex block attached to the run's tmux session unless one is already open. The first viewer stacks below
+ * the largest other block in the parent's window, or goes right of a parent that is alone; later ones stack below
+ * the newest open sibling viewer. Does nothing outside Rex or on failure.
  * The block closes by itself when the tmux session ends.
  */
 export async function ensureRexViewer(runDir: string): Promise<void> {
@@ -284,8 +343,9 @@ async function openRexViewer(runDir: string): Promise<void> {
 	if (!metadata || !rex) return;
 	if (metadata.viewerBlock && (await rexBlockExists(rex, metadata.viewerBlock))) return;
 
-	let anchor = rex.block;
-	let direction = "right";
+	const neighbor = await largestOtherBlock(rex);
+	let anchor = neighbor ?? rex.block;
+	let direction = neighbor ? "below" : "right";
 	const siblings = metadata.parentSessionId
 		? listRuns(metadata.parentSessionId)
 				.filter((run) => run.handle !== metadata.handle && run.viewerBlock && run.viewerOpenedAt)
