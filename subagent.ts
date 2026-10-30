@@ -7,6 +7,7 @@ import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import {
 	assistantText,
+	currentRexAnchor,
 	effectiveRunState,
 	getRunsDir,
 	inboxDir,
@@ -184,6 +185,7 @@ function spawnSubagent(args: string[]): void {
 		model,
 		thinking,
 		launchArgs,
+		rex: currentRexAnchor(),
 		state: "starting",
 		hasStarted: false,
 		createdAt: now,

@@ -1,4 +1,4 @@
-import { spawnSync } from "node:child_process";
+import { execFile, spawnSync } from "node:child_process";
 import {
 	accessSync,
 	constants,
@@ -8,6 +8,7 @@ import {
 	readdirSync,
 	renameSync,
 	rmSync,
+	statSync,
 	writeFileSync,
 } from "node:fs";
 import { homedir } from "node:os";
@@ -33,11 +34,22 @@ export interface RunMetadata {
 	launchArgs?: string[];
 	/** Set by the parent when it stops the child on quit or session switch; the child is relaunched on resume. */
 	suspended?: boolean;
+	/** Set when the parent runs inside Rex; the child then shows itself in a Rex block while working. */
+	rex?: RexAnchor;
+	viewerBlock?: string;
+	viewerOpenedAt?: string;
 	state: RunState;
 	hasStarted: boolean;
 	createdAt: string;
 	updatedAt: string;
 	error?: string;
+}
+
+/** The Rex block the parent Pi runs in, used to place the subagent viewer beside it. */
+export interface RexAnchor {
+	bin: string;
+	server?: string;
+	block: string;
 }
 
 export interface InboxMessage {
@@ -200,6 +212,111 @@ export function launchRun(metadata: RunMetadata, initialArgs: string[] = []): vo
 		{ encoding: "utf8" },
 	);
 	if (result.status !== 0) throw new Error(result.stderr.trim() || "Failed to create tmux session");
+}
+
+/** The Rex block this process runs in, or undefined outside Rex. */
+export function currentRexAnchor(): RexAnchor | undefined {
+	const block = process.env.REX_BLOCK;
+	if (!block) return undefined;
+	const binDir = process.env.REX_BIN_DIR;
+	return { bin: binDir ? join(binDir, "rex") : "rex", server: process.env.REX_SERVER || undefined, block };
+}
+
+const VIEWER_LOCK_STALE_MS = 30000;
+
+function runRex(anchor: RexAnchor, args: string[]): Promise<string | undefined> {
+	const serverArgs = anchor.server ? ["-S", anchor.server] : [];
+	return new Promise((resolveRun) => {
+		execFile(anchor.bin, [...serverArgs, ...args], { encoding: "utf8", timeout: 15000 }, (error, stdout) =>
+			resolveRun(error ? undefined : stdout),
+		);
+	});
+}
+
+async function rexBlockExists(anchor: RexAnchor, block: string): Promise<boolean> {
+	return (await runRex(anchor, ["block", "inspect", block])) !== undefined;
+}
+
+function parseSplitBlock(output: string): string | undefined {
+	try {
+		const value: unknown = JSON.parse(output);
+		if (typeof value !== "object" || value === null) return undefined;
+		const blockIds = (value as Record<string, unknown>).block_ids;
+		return Array.isArray(blockIds) && typeof blockIds[0] === "string" ? blockIds[0] : undefined;
+	} catch {
+		return undefined;
+	}
+}
+
+/**
+ * Open a Rex block attached to the run's tmux session unless one is already open. The first viewer goes right
+ * of the parent; later ones stack below the newest open sibling viewer. Does nothing outside Rex or on failure.
+ * The block closes by itself when the tmux session ends.
+ */
+export async function ensureRexViewer(runDir: string): Promise<void> {
+	// Serialize across children so parallel spawns stack instead of all splitting beside the parent.
+	const lock = join(getRunsDir(), ".rex-viewer.lock");
+	const deadline = Date.now() + VIEWER_LOCK_STALE_MS;
+	for (;;) {
+		try {
+			mkdirSync(lock);
+			break;
+		} catch {
+			try {
+				if (Date.now() - statSync(lock).mtimeMs > VIEWER_LOCK_STALE_MS) rmSync(lock, { recursive: true, force: true });
+			} catch {
+				// The holder released the lock meanwhile.
+			}
+			if (Date.now() > deadline) return;
+			await new Promise<void>((resolveDelay) => setTimeout(resolveDelay, 100));
+		}
+	}
+	try {
+		await openRexViewer(runDir);
+	} finally {
+		rmSync(lock, { recursive: true, force: true });
+	}
+}
+
+async function openRexViewer(runDir: string): Promise<void> {
+	const metadata = readMetadata(runDir);
+	const rex = metadata?.rex;
+	if (!metadata || !rex) return;
+	if (metadata.viewerBlock && (await rexBlockExists(rex, metadata.viewerBlock))) return;
+
+	let anchor = rex.block;
+	let direction = "right";
+	const siblings = metadata.parentSessionId
+		? listRuns(metadata.parentSessionId)
+				.filter((run) => run.handle !== metadata.handle && run.viewerBlock && run.viewerOpenedAt)
+				.sort((a, b) => (b.viewerOpenedAt ?? "").localeCompare(a.viewerOpenedAt ?? ""))
+		: [];
+	for (const sibling of siblings) {
+		if (sibling.viewerBlock && (await rexBlockExists(rex, sibling.viewerBlock))) {
+			anchor = sibling.viewerBlock;
+			direction = "below";
+			break;
+		}
+	}
+
+	const output = await runRex(rex, [
+		"split",
+		"-b",
+		anchor,
+		"--split",
+		direction,
+		"--focus=false",
+		"--label",
+		metadata.name ?? metadata.handle,
+		"--json",
+		"--",
+		"tmux",
+		"attach-session",
+		"-t",
+		metadata.tmuxSession,
+	]);
+	const viewerBlock = output ? parseSplitBlock(output) : undefined;
+	if (viewerBlock) updateMetadata(runDir, { viewerBlock, viewerOpenedAt: new Date().toISOString() });
 }
 
 export function effectiveRunState(metadata: RunMetadata): RunState {

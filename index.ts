@@ -5,7 +5,9 @@ import { fileURLToPath } from "node:url";
 import { DynamicBorder, type ExtensionAPI, type ExtensionContext, keyHint } from "@earendil-works/pi-coding-agent";
 import { Container, type SelectItem, SelectList, Text, type TUI } from "@earendil-works/pi-tui";
 import {
+	currentRexAnchor,
 	effectiveRunState,
+	ensureRexViewer,
 	inboxDir,
 	launchRun,
 	listRuns,
@@ -148,7 +150,10 @@ export default function subagentExtension(pi: ExtensionAPI) {
 
 		pi.on("session_start", (_event, ctx) => {
 			// Relaunch children that were suspended when this session was last quit or switched away from.
+			// Children place their Rex viewer beside wherever this session runs now.
+			const rex = currentRexAnchor();
 			for (const run of listRuns(ctx.sessionManager.getSessionId())) {
+				updateMetadata(run.runDir, { rex });
 				if (!run.suspended || tmuxSessionExists(run.tmuxSession)) continue;
 				if (!existsSync(run.sessionFile)) {
 					removeRunDir(run.runDir);
@@ -195,6 +200,7 @@ export default function subagentExtension(pi: ExtensionAPI) {
 	let currentContext: ExtensionContext | undefined;
 	let timer: ReturnType<typeof setInterval> | undefined;
 	let processing = false;
+	let openingViewer = false;
 	let sessionName: string | undefined;
 
 	const syncSessionName = (): void => {
@@ -276,6 +282,14 @@ export default function subagentExtension(pi: ExtensionAPI) {
 	pi.on("agent_start", (_event, ctx) => {
 		currentContext = ctx;
 		updateMetadata(runDir, { state: "busy", hasStarted: true, error: undefined });
+		if (!openingViewer) {
+			openingViewer = true;
+			void ensureRexViewer(runDir)
+				.catch(() => undefined)
+				.finally(() => {
+					openingViewer = false;
+				});
+		}
 	});
 
 	pi.on("agent_settled", (_event, ctx) => {

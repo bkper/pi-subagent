@@ -70,6 +70,8 @@ subagent stop a1b2c3
 subagent list
 ```
 
+When the parent runs inside [Rex](https://www.superlogical.com/rex), each child opens a Rex block attached to its tmux session whenever it starts working: the first beside the parent, later ones stacked below. Stopping or suspending the child closes the block; closing the block leaves the child running until its next turn reopens it. Outside Rex nothing opens.
+
 Use `/subagent` to select and attach to an active child. The status widget shows active names (or handles for unnamed runs) and their current state.
 
 ## Isolation
