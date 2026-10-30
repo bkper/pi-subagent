@@ -250,7 +250,8 @@ function parseSplitBlock(output: string): string | undefined {
 
 interface LayoutLeaf {
 	blockId: string;
-	area: number;
+	top: number;
+	right: number;
 }
 
 function collectLeaves(node: unknown, leaves: LayoutLeaf[]): void {
@@ -258,9 +259,9 @@ function collectLeaves(node: unknown, leaves: LayoutLeaf[]): void {
 	const record = node as Record<string, unknown>;
 	const rect = record.rect;
 	if (typeof record.block_id === "string" && Array.isArray(rect) && rect.length === 4) {
-		const [, , width, height] = rect;
-		if (typeof width === "number" && typeof height === "number") {
-			leaves.push({ blockId: record.block_id, area: width * height });
+		const [left, top, width] = rect;
+		if (typeof left === "number" && typeof top === "number" && typeof width === "number") {
+			leaves.push({ blockId: record.block_id, top, right: left + width });
 		}
 		return;
 	}
@@ -272,8 +273,8 @@ function collectLeaves(node: unknown, leaves: LayoutLeaf[]): void {
 	}
 }
 
-/** The largest other tiled block in the parent's Rex window, or undefined when the parent is alone. */
-async function largestOtherBlock(rex: RexAnchor): Promise<string | undefined> {
+/** The top block of the rightmost column in the parent's Rex window, excluding the parent; undefined when alone. */
+async function rightmostOtherBlock(rex: RexAnchor): Promise<string | undefined> {
 	const info = await runRex(rex, ["block", "inspect", rex.block]);
 	const sessionId = info?.match(/^session: (\S+)$/m)?.[1];
 	const windowId = info?.match(/^window: (\S+)$/m)?.[1];
@@ -301,15 +302,15 @@ async function largestOtherBlock(rex: RexAnchor): Promise<string | undefined> {
 		if (!leaves.some((leaf) => leaf.blockId === rex.block)) continue;
 		return leaves
 			.filter((leaf) => leaf.blockId !== rex.block)
-			.sort((a, b) => b.area - a.area)[0]?.blockId;
+			.sort((a, b) => b.right - a.right || a.top - b.top)[0]?.blockId;
 	}
 	return undefined;
 }
 
 /**
- * Open a Rex block attached to the run's tmux session unless one is already open. The first viewer stacks below
- * the largest other block in the parent's window, or goes right of a parent that is alone; later ones stack below
- * the newest open sibling viewer. Does nothing outside Rex or on failure.
+ * Open a Rex block attached to the run's tmux session unless one is already open. The first viewer goes above
+ * the top block of the rightmost column other than the parent, or right of a parent that is alone; later ones stack
+ * below the newest open sibling viewer. Does nothing outside Rex or on failure.
  * The block closes by itself when the tmux session ends.
  */
 export async function ensureRexViewer(runDir: string): Promise<void> {
@@ -343,9 +344,9 @@ async function openRexViewer(runDir: string): Promise<void> {
 	if (!metadata || !rex) return;
 	if (metadata.viewerBlock && (await rexBlockExists(rex, metadata.viewerBlock))) return;
 
-	const neighbor = await largestOtherBlock(rex);
+	const neighbor = await rightmostOtherBlock(rex);
 	let anchor = neighbor ?? rex.block;
-	let direction = neighbor ? "below" : "right";
+	let direction = neighbor ? "above" : "right";
 	const siblings = metadata.parentSessionId
 		? listRuns(metadata.parentSessionId)
 				.filter((run) => run.handle !== metadata.handle && run.viewerBlock && run.viewerOpenedAt)
