@@ -261,6 +261,8 @@ export default function subagentExtension(pi: ExtensionAPI) {
 		updateMetadata(runDir, {
 			childSessionId: ctx.sessionManager.getSessionId(),
 			sessionFile: ctx.sessionManager.getSessionFile() ?? metadata.sessionFile,
+			...(ctx.model ? { provider: ctx.model.provider, model: ctx.model.id } : {}),
+			...(ctx.thinkingLevel !== undefined ? { thinking: ctx.thinkingLevel } : {}),
 			state: ctx.isIdle() ? "idle" : "busy",
 			suspended: undefined,
 			error: undefined,
@@ -271,6 +273,21 @@ export default function subagentExtension(pi: ExtensionAPI) {
 			timer.unref();
 		}
 		void processInbox();
+	});
+
+	pi.on("model_select", (event, ctx) => {
+		const model = ctx.model ?? event.model;
+		updateMetadata(runDir, {
+			provider: model.provider,
+			model: model.id,
+			// Model switches can change effective thinking without a thinking-level event.
+			...(ctx.thinkingLevel !== undefined ? { thinking: ctx.thinkingLevel } : {}),
+		});
+	});
+
+	pi.on("thinking_level_select", (event, ctx) => {
+		// Pi does not await these events, so the payload may already be stale.
+		updateMetadata(runDir, { thinking: ctx.thinkingLevel ?? event.level });
 	});
 
 	pi.on("agent_start", (_event, ctx) => {
