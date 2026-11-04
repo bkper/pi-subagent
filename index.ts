@@ -27,12 +27,10 @@ function isInboxMessage(value: unknown): value is InboxMessage {
 	return typeof message.message === "string" && (message.delivery === "auto" || message.delivery === "followUp");
 }
 
-function displayState(metadata: RunMetadata): string {
-	return effectiveRunState(metadata).padEnd(8);
-}
-
 export default function subagentExtension(pi: ExtensionAPI) {
 	const runDir = process.env.PI_SUBAGENT_RUN_DIR;
+	let pickerSession = {};
+	let refreshPicker: ((runs?: RunMetadata[]) => void) | undefined;
 	if (!runDir) {
 		pi.on("resources_discover", () => ({ skillPaths: [join(packageDir, "skills")] }));
 	}
@@ -40,33 +38,77 @@ export default function subagentExtension(pi: ExtensionAPI) {
 	pi.registerCommand("subagent", {
 		description: "Select and attach to a subagent spawned by this session",
 		handler: async (_args, ctx) => {
-			const runs = listRuns(ctx.sessionManager.getSessionId()).filter((run) => effectiveRunState(run) !== "exited");
+			const sessionId = ctx.sessionManager.getSessionId();
+			let runs = listRuns(sessionId)
+				.map((run) => ({ ...run, state: effectiveRunState(run) }))
+				.filter((run) => run.state !== "exited");
 			if (runs.length === 0) {
 				ctx.ui.notify("No active subagents spawned by this session", "info");
 				return;
 			}
 
-			const items: SelectItem[] = runs.map((run) => ({
-				value: run.handle,
-				label: `${runDisplayName(run)}  ${displayState(run)}  ${run.provider}/${run.model}  ${run.thinking}`,
-			}));
+			refreshPicker?.();
+			const picker = (pickerSession = {});
+			const isCurrent = () => pickerSession === picker && ctx.sessionManager.getSessionId() === sessionId;
 			let tui: TUI | undefined;
 			const selected = await ctx.ui.custom<string | undefined>((customTui, theme, _keybindings, done) => {
 				tui = customTui;
-				const list = new SelectList(items, Math.min(items.length, 10), {
-					selectedPrefix: (text) => theme.fg("accent", text),
-					selectedText: (text) => theme.fg("accent", text),
-					description: (text) => theme.fg("muted", text),
-					scrollInfo: (text) => theme.fg("dim", text),
-					noMatch: (text) => theme.fg("warning", text),
-				});
-				list.onSelect = (item) => done(item.value);
-				list.onCancel = () => done(undefined);
+				let active = true;
+				const dispose = () => {
+					active = false;
+					if (refreshPicker === refresh) refreshPicker = undefined;
+				};
+				const finish = (value?: string) => {
+					if (!active) return;
+					dispose();
+					done(value);
+				};
+				const listTheme = {
+					selectedPrefix: (text: string) => theme.fg("accent", text),
+					selectedText: (text: string) => theme.fg("accent", text),
+					description: (text: string) => theme.fg("muted", text),
+					scrollInfo: (text: string) => theme.fg("dim", text),
+					noMatch: (text: string) => theme.fg("warning", text),
+				};
+				let items: SelectItem[] = [];
+				let list: SelectList;
+				const listContainer = new Container();
+				const refresh = (nextRuns?: RunMetadata[]) => {
+					if (!active) return;
+					if (!nextRuns || !isCurrent()) {
+						finish();
+						return;
+					}
+					runs = nextRuns;
+					const nextItems: SelectItem[] = runs.map((run) => ({
+						value: run.handle,
+						label: `${runDisplayName(run)}  ${run.state.padEnd(8)}  ${run.provider}/${run.model}  ${run.thinking}`,
+					}));
+					if (
+						items.length === nextItems.length &&
+						items.every((item, i) => item.value === nextItems[i].value && item.label === nextItems[i].label)
+					) return;
+					const handle = list?.getSelectedItem()?.value;
+					const index = Math.max(0, items.findIndex((item) => item.value === handle));
+					const hadList = !!list;
+					items = nextItems;
+					list = new SelectList(items, Math.min(items.length, 10), listTheme);
+					const retainedIndex = items.findIndex((item) => item.value === handle);
+					list.setSelectedIndex(retainedIndex < 0 ? Math.min(index, items.length - 1) : retainedIndex);
+					list.onSelect = (item) => finish(item.value);
+					list.onCancel = () => finish();
+					listContainer.clear();
+					listContainer.addChild(items.length ? list :
+						new Text(theme.fg("warning", "No active subagents spawned by this session"), 2, 0));
+					if (hadList) customTui.requestRender();
+				};
+				refresh(runs);
+				if (active) refreshPicker = refresh;
 
 				const container = new Container();
 				container.addChild(new DynamicBorder((text: string) => theme.fg("accent", text)));
 				container.addChild(new Text(theme.fg("accent", theme.bold("Attach to subagent")), 1, 0));
-				container.addChild(list);
+				container.addChild(listContainer);
 				container.addChild(
 					new Text(
 						theme.fg(
@@ -83,14 +125,24 @@ export default function subagentExtension(pi: ExtensionAPI) {
 					render: (width) => container.render(width),
 					invalidate: () => container.invalidate(),
 					handleInput: (data) => {
+						if (!active) return;
+						if (!isCurrent()) {
+							finish();
+							return;
+						}
 						list.handleInput(data);
-						customTui.requestRender();
+						if (active) customTui.requestRender();
 					},
+					dispose,
 				};
 			});
-			if (!selected || !tui) return;
-			const run = runs.find((candidate) => candidate.handle === selected);
-			if (!run) return;
+			if (!selected || !tui || !isCurrent()) return;
+			const candidate = runs.find((run) => run.handle === selected);
+			const run = candidate && readMetadata(candidate.runDir);
+			if (
+				!run || run.handle !== selected || run.parentSessionId !== sessionId || run.suspended ||
+				run.state === "exited" || !tmuxSessionExists(run.tmuxSession)
+			) return;
 
 			if (process.env.TMUX) {
 				const exitCode = await new Promise<number | null>((resolveExit) => {
@@ -126,6 +178,7 @@ export default function subagentExtension(pi: ExtensionAPI) {
 			const activeRuns = listRuns(widgetContext.sessionManager.getSessionId())
 				.map((run) => ({ run, state: effectiveRunState(run) }))
 				.filter(({ state }) => state !== "exited");
+			refreshPicker?.(activeRuns.map(({ run, state }) => ({ ...run, state })));
 			if (activeRuns.length === 0) {
 				widgetContext.ui.setWidget("subagents", undefined);
 				return;
@@ -147,6 +200,11 @@ export default function subagentExtension(pi: ExtensionAPI) {
 		};
 
 		pi.on("session_start", (_event, ctx) => {
+			pickerSession = {};
+			refreshPicker?.();
+			if (widgetTimer) clearInterval(widgetTimer);
+			widgetTimer = undefined;
+			widgetContext = undefined;
 			// Relaunch children that were suspended when this session was last quit or switched away from.
 			for (const run of listRuns(ctx.sessionManager.getSessionId())) {
 				if (!run.suspended || tmuxSessionExists(run.tmuxSession)) continue;
@@ -172,6 +230,8 @@ export default function subagentExtension(pi: ExtensionAPI) {
 		});
 
 		pi.on("session_shutdown", async (event, ctx) => {
+			pickerSession = {};
+			refreshPicker?.();
 			if (widgetTimer) clearInterval(widgetTimer);
 			widgetTimer = undefined;
 			widgetContext = undefined;
