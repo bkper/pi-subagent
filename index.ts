@@ -2,8 +2,8 @@ import { spawn, spawnSync } from "node:child_process";
 import { existsSync, readFileSync, readdirSync, unlinkSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { DynamicBorder, type ExtensionAPI, type ExtensionContext, keyHint } from "@earendil-works/pi-coding-agent";
-import { Container, type SelectItem, SelectList, Text, type TUI } from "@earendil-works/pi-tui";
+import { DynamicBorder, type ExtensionAPI, type ExtensionContext, keyHint, type ThemeColor } from "@earendil-works/pi-coding-agent";
+import { Container, type SelectItem, SelectList, truncateToWidth, type TUI, visibleWidth } from "@earendil-works/pi-tui";
 import {
 	effectiveRunState,
 	inboxDir,
@@ -65,12 +65,17 @@ export default function subagentExtension(pi: ExtensionAPI) {
 				};
 				const listTheme = {
 					selectedPrefix: (text: string) => theme.fg("accent", text),
-					selectedText: (text: string) => theme.fg("accent", text),
+					// SelectList applies selectedText to the entire row, including its arrow.
+					selectedText: (text: string) => theme.fg("accent", text.slice(0, 2)) + text.slice(2),
 					description: (text: string) => theme.fg("muted", text),
 					scrollInfo: (text: string) => theme.fg("dim", text),
 					noMatch: (text: string) => theme.fg("warning", text),
 				};
-				let items: SelectItem[] = [];
+				const thinkingColors: Record<string, ThemeColor> = {
+					off: "thinkingOff", minimal: "thinkingMinimal", low: "thinkingLow", medium: "thinkingMedium",
+					high: "thinkingHigh", xhigh: "thinkingXhigh", max: "thinkingMax",
+				};
+				let items: (SelectItem & { run: RunMetadata; modelName: string })[] = [];
 				let list: SelectList;
 				const listContainer = new Container();
 				const refresh = (nextRuns?: RunMetadata[]) => {
@@ -80,10 +85,14 @@ export default function subagentExtension(pi: ExtensionAPI) {
 						return;
 					}
 					runs = nextRuns;
-					const nextItems: SelectItem[] = runs.map((run) => ({
-						value: run.handle,
-						label: `${runDisplayName(run)}  ${run.state.padEnd(8)}  ${run.provider}/${run.model}  ${run.thinking}`,
-					}));
+					const nextItems = runs.map((run) => {
+						const modelName = ctx.modelRegistry.find(run.provider, run.model)?.name ?? run.model;
+						return {
+							value: run.handle,
+							label: `${runDisplayName(run)}  ${run.state}  ${modelName} (${run.provider})  ${run.thinking}`,
+							run, modelName,
+						};
+					});
 					if (
 						items.length === nextItems.length &&
 						items.every((item, i) => item.value === nextItems[i].value && item.label === nextItems[i].label)
@@ -92,14 +101,36 @@ export default function subagentExtension(pi: ExtensionAPI) {
 					const index = Math.max(0, items.findIndex((item) => item.value === handle));
 					const hadList = !!list;
 					items = nextItems;
-					list = new SelectList(items, Math.min(items.length, 10), listTheme);
+					const nameWidth = Math.max(0, ...runs.map((run) => visibleWidth(runDisplayName(run))));
+					const stateWidth = Math.max(0, ...runs.map((run) => visibleWidth(run.state)));
+					list = new SelectList(items, Math.min(items.length, 10), listTheme, {
+						truncatePrimary: ({ item, maxWidth, isSelected }) => {
+							const { run, modelName } = items.find((row) => row.value === item.value)!;
+							const width = Math.max(0, maxWidth);
+							const identityWidth = Math.min(nameWidth, width, Math.max(2, width - stateWidth - 2));
+							const identity = truncateToWidth(runDisplayName(run), identityWidth, "…");
+							const stateColor = run.state === "busy" ? "warning" : run.state === "idle" ? "success" :
+								run.state === "error" ? "error" : "muted";
+							const left = theme.fg(isSelected ? "accent" : "text", identity) +
+								" ".repeat(identityWidth - visibleWidth(identity)) + (identityWidth ? "  " : "") +
+								theme.fg(stateColor, run.state);
+							const leftWidth = visibleWidth(left);
+							const thinkingColor = Object.hasOwn(thinkingColors, run.thinking) ? thinkingColors[run.thinking] : "muted";
+							const metadata = theme.fg("muted", `${modelName} (${run.provider})  `) + theme.fg(thinkingColor, run.thinking);
+							const right = truncateToWidth(metadata, Math.max(0, width - leftWidth - 2));
+							return visibleWidth(right) ? left + " ".repeat(width - leftWidth - visibleWidth(right)) + right :
+								truncateToWidth(left, width);
+						},
+					});
 					const retainedIndex = items.findIndex((item) => item.value === handle);
 					list.setSelectedIndex(retainedIndex < 0 ? Math.min(index, items.length - 1) : retainedIndex);
 					list.onSelect = (item) => finish(item.value);
 					list.onCancel = () => finish();
 					listContainer.clear();
-					listContainer.addChild(items.length ? list :
-						new Text(theme.fg("warning", "No active subagents spawned by this session"), 2, 0));
+					listContainer.addChild(items.length ? list : {
+						render: () => [theme.fg("warning", "  No active subagents spawned by this session")],
+						invalidate() {},
+					});
 					if (hadList) customTui.requestRender();
 				};
 				refresh(runs);
@@ -107,22 +138,32 @@ export default function subagentExtension(pi: ExtensionAPI) {
 
 				const container = new Container();
 				container.addChild(new DynamicBorder((text: string) => theme.fg("accent", text)));
-				container.addChild(new Text(theme.fg("accent", theme.bold("Attach to subagent")), 1, 0));
+				container.addChild({
+					render: () => [
+						theme.fg("accent", theme.bold(" Attach to subagent")),
+						theme.fg("muted", " Choose an active child spawned by this session."),
+						"",
+					],
+					invalidate() {},
+				});
 				container.addChild(listContainer);
-				container.addChild(
-					new Text(
-						theme.fg(
-							"dim",
-							`${keyHint("tui.select.confirm", "attach")}  ${keyHint("tui.select.cancel", "cancel")}`,
-						),
-						1,
-						0,
-					),
-				);
+				container.addChild({
+					render: (width) => {
+						const hints = [keyHint("tui.select.confirm", "attach"), keyHint("tui.select.cancel", "cancel")];
+						const lines = [""];
+						for (const hint of hints) {
+							const last = lines.length - 1;
+							if (lines[last] && visibleWidth(`${lines[last]}  ${hint}`) <= width) lines[last] += `  ${hint}`;
+							else lines.push((visibleWidth(hint) < width ? " " : "") + hint);
+						}
+						return lines;
+					},
+					invalidate() {},
+				});
 				container.addChild(new DynamicBorder((text: string) => theme.fg("accent", text)));
 
 				return {
-					render: (width) => container.render(width),
+					render: (width) => container.render(width).map((line) => truncateToWidth(line, width, "")),
 					invalidate: () => container.invalidate(),
 					handleInput: (data) => {
 						if (!active) return;
